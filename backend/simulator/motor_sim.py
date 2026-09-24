@@ -206,7 +206,7 @@ def simulate(
     )
     fundamental_v = fundamental_i.model_copy(update={"phase_rad": 0.0, "channel": "voltage"})
     enveloped = [fundamental_i, *_background_components(spec, fmap, cfg, rng)]
-    fault_comps = [c for f in faults for c in fault_components(fmap, f, rng)]
+    fault_comps = [c for f in faults for c in fault_components(fmap, f, rng, -pf_angle)]
     voltage_comps: list[InjectedComponent] = [fundamental_v]
     for u in (c for c in confounders if isinstance(c, SupplyUnbalance)):
         v_comp, i_comp = _supply_unbalance(spec, u, cfg, i_rms, rng)

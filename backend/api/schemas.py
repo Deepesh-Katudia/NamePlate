@@ -6,9 +6,10 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.models.alert import Candidate
+from backend.models.diagnosis import Receipt
 from backend.models.fault_map import ConfirmationItem, FaultClass, FaultMap, UnavailableFault
 from backend.models.motor import MotorSpec
 from backend.simulator.faults import Confounder, FaultInjection
@@ -157,6 +158,10 @@ class Alert(BaseModel):
     last_seen_at: datetime
     windows_seen: int
     candidate: Candidate
+    receipt: Receipt | None = None
+    discarded_at_z: float | None = Field(
+        default=None, description="Strongest z when discarded; re-opens if it grows"
+    )
 
 
 # --- requests -------------------------------------------------------------------------
@@ -172,6 +177,26 @@ class InjectRequest(BaseModel):
     faults: list[FaultInjection] = Field(default_factory=list)
     confounders: list[Confounder] = Field(default_factory=list)
     advance_windows: int = Field(default=0, ge=0, le=50)
+
+
+class DiagnoseRequest(BaseModel):
+    alert_id: str | None = Field(
+        default=None, description="Alert to diagnose; defaults to the strongest open alert"
+    )
+
+
+class CommissioningPreviewRequest(BaseModel):
+    """Exactly one of `spec` (structured nameplate) or `nameplate_text` (free text)."""
+
+    spec: dict | None = None
+    nameplate_text: str | None = Field(default=None, max_length=5000)
+    asset_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> CommissioningPreviewRequest:
+        if (self.spec is None) == (self.nameplate_text is None):
+            raise ValueError("provide exactly one of spec or nameplate_text")
+        return self
 
 
 class AdvanceRequest(BaseModel):

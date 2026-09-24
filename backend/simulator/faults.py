@@ -135,8 +135,53 @@ def _bin_level_db(fault: SimFault, primary_db: float, b: FaultBin) -> float:
     return level
 
 
+def _sideband_components(
+    fault: SimFault,
+    bins: list[FaultBin],
+    f_s: float,
+    primary_db: float,
+    carrier_phase_rad: float,
+    rng: np.random.Generator,
+) -> list[InjectedComponent]:
+    """Lower/upper pairs as coherent amplitude modulation of the fundamental.
+
+    A defect modulates the current: m*cos(w_m t + phi) * cos(w_s t + theta) puts sidebands at
+    w_s -/+ w_m with phases theta -/+ phi. Independent random phases per sideband would make
+    some pairs pure phase modulation, which has no envelope line; real defects produce AM.
+    A lower sideband whose signed frequency f_s - d is negative folds to |f_s - d| with its
+    phase and phase sequence reversed.
+    """
+    pairs: dict[tuple[str, int], dict[str, FaultBin]] = {}
+    for b in bins:
+        pairs.setdefault((b.source, b.harmonic), {})[b.sideband] = b
+    components: list[InjectedComponent] = []
+    for pair in pairs.values():
+        phi = float(rng.uniform(0, 2 * np.pi))
+        upper = pair.get("upper")
+        for side, b in pair.items():
+            phase = carrier_phase_rad + (phi if side == "upper" else -phi)
+            order = 1
+            folded = side == "lower" and upper is not None and 2 * f_s - upper.frequency_hz < 0
+            if folded:
+                phase, order = -phase, -1
+            components.append(
+                InjectedComponent(
+                    label=f"{fault.value}: {b.label}",
+                    frequency_hz=b.frequency_hz,
+                    amplitude_rel=_db_to_ratio(_bin_level_db(fault, primary_db, b)),
+                    phase_order=order,
+                    phase_rad=phase,
+                    fault=fault,
+                )
+            )
+    return components
+
+
 def fault_components(
-    fmap: FaultMap, injection: FaultInjection, rng: np.random.Generator
+    fmap: FaultMap,
+    injection: FaultInjection,
+    rng: np.random.Generator,
+    carrier_phase_rad: float = 0.0,
 ) -> list[InjectedComponent]:
     """Current components for one injected fault, placed on physics-engine bins."""
     fault = injection.fault
@@ -153,14 +198,6 @@ def fault_components(
             )
         ]
     primary_db = _primary_level_db(fault, injection.severity)
-    return [
-        InjectedComponent(
-            label=f"{fault.value}: {b.label}",
-            frequency_hz=b.frequency_hz,
-            amplitude_rel=_db_to_ratio(_bin_level_db(fault, primary_db, b)),
-            phase_order=1,
-            phase_rad=float(rng.uniform(0, 2 * np.pi)),
-            fault=fault,
-        )
-        for b in _select_bins(fmap, injection)
-    ]
+    return _sideband_components(
+        fault, _select_bins(fmap, injection), f_s, primary_db, carrier_phase_rad, rng
+    )

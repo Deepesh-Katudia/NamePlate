@@ -13,6 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 MIN_SUPPLY_FREQUENCY_HZ = 1.0
 MAX_SUPPLY_FREQUENCY_HZ = 400.0  # upper bound of typical VFD output
+# Identifiers flow into agent prompts; restrict them to what real tags and catalogue
+# designations use so free text cannot ride along.
+ASSET_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$"
+DESIGNATION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 ./\-]*$"
 
 
 class BearingPosition(StrEnum):
@@ -57,7 +61,12 @@ class BearingSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     position: BearingPosition
-    designation: str = Field(min_length=1, max_length=64)
+    designation: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=DESIGNATION_PATTERN,
+        description="Catalogue designation, e.g. 6309-2Z/C3",
+    )
     geometry: BearingGeometry | None = None
 
 
@@ -66,7 +75,7 @@ class MotorSpec(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    asset_id: str = Field(min_length=1, max_length=64)
+    asset_id: str = Field(min_length=1, max_length=64, pattern=ASSET_ID_PATTERN)
     rated_power_kw: float = Field(gt=0)
     rated_voltage_v: float = Field(gt=0)
     rated_current_a: float = Field(gt=0)

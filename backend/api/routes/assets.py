@@ -5,21 +5,28 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from starlette.concurrency import run_in_threadpool
 
-from backend.api.deps import get_service
+from backend.agents.commissioning import CommissioningResult
+from backend.api.deps import get_diagnosis, get_service
+from backend.api.diagnosis_service import DiagnosisService
 from backend.api.schemas import (
     Alert,
     AssetCreate,
     AssetDetail,
     AssetSummary,
+    CommissioningPreviewRequest,
+    DiagnoseRequest,
     Envelope,
     SpectrumView,
     ok,
 )
 from backend.api.service import MonitoringService
+from backend.models.diagnosis import Receipt
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 Service = Annotated[MonitoringService, Depends(get_service)]
+Diagnosis = Annotated[DiagnosisService, Depends(get_diagnosis)]
 
 DEFAULT_SPECTRUM_MAX_HZ = 500.0
 
@@ -60,7 +67,23 @@ def get_alerts(asset_id: str, service: Service) -> Envelope[list[Alert]]:
     return ok(alerts, meta={"total": len(alerts)})
 
 
-@router.post("/{asset_id}/diagnose", status_code=status.HTTP_501_NOT_IMPLEMENTED)
-def diagnose(asset_id: str, service: Service) -> None:
-    service.get(asset_id)
-    raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "Diagnosis agent is not implemented yet")
+@router.post("/{asset_id}/diagnose", response_model=Envelope[Receipt])
+async def diagnose(
+    asset_id: str, diagnosis: Diagnosis, body: DiagnoseRequest | None = None
+) -> Envelope[Receipt]:
+    """Run the Diagnosis Agent on an open alert (and the Action Agent if it is confirmed)."""
+    alert_id = body.alert_id if body else None
+    receipt = await run_in_threadpool(diagnosis.diagnose, asset_id, alert_id)
+    return ok(receipt)
+
+
+preview_router = APIRouter(prefix="/api/commissioning", tags=["commissioning"])
+
+
+@preview_router.post("/preview", response_model=Envelope[CommissioningResult])
+async def commissioning_preview(
+    body: CommissioningPreviewRequest, diagnosis: Diagnosis
+) -> Envelope[CommissioningResult]:
+    """Validate a nameplate (structured or free text) and derive its fault map. Not saved."""
+    result = await run_in_threadpool(diagnosis.commissioning_preview, body)
+    return ok(result)

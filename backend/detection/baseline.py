@@ -147,6 +147,14 @@ class SustainedExceedanceDetector:
     def baseline(self, asset_id: str, bucket: LoadBucket, key: str) -> BinBaseline:
         return self._baselines.get((asset_id, bucket, key), BinBaseline())
 
+    def snapshot(self, asset_id: str) -> dict[tuple[LoadBucket, str], BinBaseline]:
+        """Immutable copy of one asset's baselines (values are frozen tuples)."""
+        return {
+            (bucket, key): base
+            for (asset, bucket, key), base in list(self._baselines.items())
+            if asset == asset_id
+        }
+
     def _score(self, asset_id: str, bucket: LoadBucket, m: BinMeasurement) -> tuple[BinScore, bool]:
         cfg, k = self.config, (asset_id, bucket, m.key)
         base = self._baselines.get(k, BinBaseline())

@@ -10,10 +10,12 @@ from __future__ import annotations
 import math
 import threading
 import zlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import numpy as np
 
+from backend.agents.monitoring import MonitoringAgent
 from backend.api.repository import Repository
 from backend.api.schemas import (
     HEALTH_SEVERITY_ORDER,
@@ -36,16 +38,15 @@ from backend.api.schemas import (
     WindowSnapshot,
 )
 from backend.api.settings import Settings
-from backend.detection.baseline import (
-    DetectorConfig,
-    ObservationResult,
-    SustainedExceedanceDetector,
-)
-from backend.detection.features import WindowFeatures, analyze_window
+from backend.detection.baseline import DetectorConfig, LoadBucket, ObservationResult
+from backend.detection.features import WindowFeatures
 from backend.energy.load import DEFAULT_LOSS_SPLIT, rated_losses_w
 from backend.models.alert import Candidate
 from backend.physics.fault_map import build_fault_map
 from backend.simulator.motor_sim import SimulationConfig, SimulationResult, simulate
+
+REOPEN_Z_FACTOR = 2.0  # a discarded alert re-opens if its strongest z doubles
+RECAPTURE_SEED_OFFSET = 1_000_000
 
 OVERSIZING_LOAD_THRESHOLD = 0.5
 RIGHT_SIZED_LOAD = 0.75
@@ -63,6 +64,16 @@ class AssetNotFoundError(KeyError):
     pass
 
 
+@dataclass(frozen=True)
+class LatestWindow:
+    """Raw capture and features of an asset's most recent window, kept in memory for
+    diagnosis. Waveforms are deliberately not persisted through the repository."""
+
+    capture: SimulationResult
+    features: WindowFeatures
+    load_bucket: LoadBucket | None
+
+
 class MonitoringService:
     def __init__(
         self,
@@ -72,7 +83,9 @@ class MonitoringService:
     ) -> None:
         self.repo = repository
         self.settings = settings or Settings()
-        self.detector = SustainedExceedanceDetector(detector_config)
+        self.monitoring = MonitoringAgent(detector_config)
+        self.detector = self.monitoring.detector
+        self._latest: dict[str, LatestWindow] = {}
         self._state_lock = threading.Lock()  # detector + repository updates
         self._asset_locks: dict[str, threading.Lock] = {}
         self._asset_locks_guard = threading.Lock()
@@ -102,14 +115,16 @@ class MonitoringService:
 
     # --- window processing ------------------------------------------------------------
 
-    def _capture(self, record: AssetRecord) -> SimulationResult:
+    def _capture(
+        self, record: AssetRecord, duration_s: float | None = None, seed_offset: int = 0
+    ) -> SimulationResult:
         sim = record.simulation
-        seed = zlib.crc32(record.spec.asset_id.encode()) + record.windows_processed
+        seed = zlib.crc32(record.spec.asset_id.encode()) + record.windows_processed + seed_offset
         rng = np.random.default_rng(seed)
         load = sim.load_factor * (1 + rng.uniform(-sim.load_jitter, sim.load_jitter))
         config = SimulationConfig(
             sample_rate_hz=self.settings.sample_rate_hz,
-            duration_s=self.settings.window_duration_s,
+            duration_s=duration_s or self.settings.window_duration_s,
             load_factor=min(max(load, 0.05), 1.3),
             seed=seed,
         )
@@ -123,19 +138,38 @@ class MonitoringService:
         """Windows of one asset run in order; different assets analyse in parallel."""
         with self._asset_lock(asset_id):
             record = self.get(asset_id)
-            features = analyze_window(record.spec, self._capture(record))
+            capture = self._capture(record)
+            features = self.monitoring.analyze(record.spec, capture)
             now = datetime.now(UTC)
             with self._state_lock:
-                return self._record_window(record, features, now)
+                return self._record_window(record, capture, features, now)
+
+    def recapture(self, asset_id: str, duration_s: float) -> SimulationResult:
+        """A fresh, longer capture for diagnostics (in deployment: a request to the drive)."""
+        return self._capture(self.get(asset_id), duration_s, RECAPTURE_SEED_OFFSET)
+
+    def baseline_snapshot(self, asset_id: str) -> dict:
+        """Consistent copy of an asset's baselines for a diagnosis session."""
+        with self._state_lock:
+            return self.detector.snapshot(asset_id)
+
+    def latest(self, asset_id: str) -> LatestWindow:
+        """Latest window for diagnosis, processing one first if none is held in memory."""
+        if asset_id not in self._latest:
+            self.run_window(asset_id)
+        return self._latest[asset_id]
 
     def _record_window(
-        self, record: AssetRecord, features: WindowFeatures, now: datetime
+        self,
+        record: AssetRecord,
+        capture: SimulationResult,
+        features: WindowFeatures,
+        now: datetime,
     ) -> WindowResultView:
         asset_id = record.spec.asset_id
-        observation = (
-            self.detector.observe(asset_id, features.load.load_factor, features.measurements, now)
-            if features.stationary
-            else None
+        observation = self.monitoring.score(record.spec, features, now)
+        self._latest[asset_id] = LatestWindow(
+            capture, features, observation.load_bucket if observation else None
         )
         new_alerts = self._update_alerts(observation.candidates if observation else [], now)
         health = self._health(asset_id, observation, record.health)
@@ -168,16 +202,20 @@ class MonitoringService:
             existing = next(
                 (a for a in self.repo.list_alerts(cand.asset_id) if a.id == alert_id), None
             )
-            if existing is not None and existing.status == AlertStatus.ACTIVE:
-                self.repo.upsert_alert(
-                    existing.model_copy(
-                        update={
-                            "last_seen_at": now,
-                            "windows_seen": existing.windows_seen + 1,
-                            "candidate": cand,
-                        }
-                    )
+            if existing is not None:
+                refreshed = existing.model_copy(
+                    update={
+                        "last_seen_at": now,
+                        "windows_seen": existing.windows_seen + 1,
+                        "candidate": cand,
+                    }
                 )
+                if _should_reopen(existing, cand):
+                    refreshed = refreshed.model_copy(
+                        update={"status": AlertStatus.ACTIVE, "discarded_at_z": None}
+                    )
+                    new.append(refreshed)
+                self.repo.upsert_alert(refreshed)
                 continue
             alert = Alert(
                 id=alert_id,
@@ -206,7 +244,18 @@ class MonitoringService:
         return HealthState.LEARNING if observation.learning else HealthState.HEALTHY
 
     def active_alert_count(self, asset_id: str) -> int:
-        return sum(1 for a in self.repo.list_alerts(asset_id) if a.status == AlertStatus.ACTIVE)
+        """Open alerts: everything not discarded (confirmed faults stay open until repaired)."""
+        return sum(1 for a in self.repo.list_alerts(asset_id) if a.status != AlertStatus.DISCARDED)
+
+    def record_diagnosis(self, alert: Alert) -> None:
+        """Persist a diagnosed alert and refresh the asset's health."""
+        with self._state_lock:
+            self.repo.upsert_alert(alert)
+            record = self.get(alert.asset_id)
+            health = (
+                HealthState.ALERT if self.active_alert_count(alert.asset_id) else HealthState.WATCH
+            )
+            self.repo.update_asset(record.model_copy(update={"health": health}))
 
     # --- read models ------------------------------------------------------------------
 
@@ -286,6 +335,18 @@ class MonitoringService:
                 "Annual figure assumes continuous operation at the latest load",
             ],
         )
+
+
+def max_z(candidate: Candidate) -> float:
+    return max(e.z_score for e in candidate.evidence)
+
+
+def _should_reopen(existing: Alert, candidate: Candidate) -> bool:
+    return (
+        existing.status == AlertStatus.DISCARDED
+        and existing.discarded_at_z is not None
+        and max_z(candidate) > REOPEN_Z_FACTOR * existing.discarded_at_z
+    )
 
 
 def _energy_view(record: AssetRecord, latest: WindowSnapshot) -> EnergyAsset:

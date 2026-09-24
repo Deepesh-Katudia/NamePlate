@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from backend.api.main import create_app
 from backend.api.settings import Settings
 from backend.detection.baseline import DetectorConfig
+from backend.models.diagnosis import WorkOrderDraft
+from backend.tests.fakes import ScriptedLLM, tool_call, verdict
 
 FAST = Settings(window_duration_s=8.0, sample_rate_hz=4000.0)
 FAST_DETECTOR = DetectorConfig(min_baseline_windows=4, consecutive_windows=3)
@@ -34,7 +36,7 @@ def spec(asset_id="M-1", **overrides) -> dict:
 
 @pytest.fixture
 def client():
-    with TestClient(create_app(FAST, detector_config=FAST_DETECTOR)) as c:
+    with TestClient(create_app(FAST, detector_config=FAST_DETECTOR, llm=None)) as c:
         yield c
 
 
@@ -148,12 +150,12 @@ class TestMonitoring:
         assert r.json()["error"]["code"] == "domain_error"
 
     def test_internal_value_error_is_500_not_422(self, monkeypatch):
-        app = create_app(FAST, detector_config=FAST_DETECTOR)
+        app = create_app(FAST, detector_config=FAST_DETECTOR, llm=None)
 
         def broken(*_args, **_kwargs):
             raise ValueError("expected shape (3, N)")
 
-        monkeypatch.setattr("backend.api.service.analyze_window", broken)
+        monkeypatch.setattr("backend.agents.monitoring.analyze_window", broken)
         with TestClient(app, raise_server_exceptions=False) as c:
             commission(c)
             r = c.post("/api/simulator/advance", json={"asset_id": "M-1", "windows": 1})
@@ -175,9 +177,112 @@ class TestMonitoring:
         r = client.post("/api/simulator/advance", json={"asset_id": "M-1", "windows": 500})
         assert r.status_code == 422
 
-    def test_diagnose_not_yet_implemented(self, client):
+    def test_diagnose_without_llm_is_503(self, client):
         commission(client)
-        assert client.post("/api/assets/M-1/diagnose").status_code == 501
+        r = client.post("/api/assets/M-1/diagnose")
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "agent_unavailable"
+
+
+DRAFT = WorkOrderDraft(
+    confirming_offline_test="Vibration envelope measurement at the DE bearing housing",
+    parts=["6205 bearing"],
+    recommended_window="Within two weeks",
+    actions=["Isolate and lock out", "Replace DE bearing"],
+    safety_notes=["Lock out and verify zero energy"],
+)
+
+
+def raise_outer_race_alert(client) -> str:
+    commission(client)
+    advance(client, windows=5)
+    client.post(
+        "/api/simulator/inject",
+        json={
+            "asset_id": "M-1",
+            "faults": [{"fault": "bearing_outer", "severity": 0.6, "bearing_position": "DE"}],
+            "advance_windows": 3,
+        },
+    )
+    alerts = client.get("/api/assets/M-1/alerts").json()["data"]
+    return next(a["id"] for a in alerts if a["fault_class"] == "bearing_outer")
+
+
+class TestDiagnosis:
+    def _client(self, llm):
+        return TestClient(create_app(FAST, detector_config=FAST_DETECTOR, llm=llm))
+
+    def test_end_to_end_receipt_with_work_order(self):
+        llm = ScriptedLLM(
+            [
+                tool_call("envelope_analysis", {"bearing_position": "DE"}, "Outer race?"),
+                verdict("confirmed", 0.9),
+            ],
+            parsed=DRAFT,
+        )
+        with self._client(llm) as c:
+            alert_id = raise_outer_race_alert(c)
+            r = c.post("/api/assets/M-1/diagnose", json={"alert_id": alert_id})
+            assert r.status_code == 200, r.text
+            receipt = r.json()["data"]
+            alerts = c.get("/api/assets/M-1/alerts").json()["data"]
+            health = c.get("/api/assets/M-1").json()["data"]["summary"]["health"]
+        assert receipt["verdict"]["status"] == "confirmed"
+        assert receipt["verdict"]["evidence"][0]["tool"] == "envelope_analysis"
+        assert any(b["equation"].startswith("f_bearing") for b in receipt["predicted_bins"])
+        assert receipt["operating_point"]["slip_source"] == "principal_slot_harmonic"
+        assert receipt["work_order"]["severity"] in {"high", "critical"}
+        assert receipt["limitations"]  # baseline assumption is always disclosed
+        stored = next(a for a in alerts if a["id"] == alert_id)
+        assert stored["status"] == "confirmed" and stored["receipt"]["alert_id"] == alert_id
+        assert health == "alert"
+
+    def test_discarded_alert_is_not_re_raised_while_candidate_persists(self):
+        llm = ScriptedLLM(
+            [
+                tool_call("load_matched_compare", {}),
+                verdict("discarded", 0.7, "energy explained by another source"),
+            ]
+        )
+        with self._client(llm) as c:
+            alert_id = raise_outer_race_alert(c)
+            c.post("/api/assets/M-1/diagnose", json={"alert_id": alert_id})
+            windows = advance(c, windows=2)
+            alerts = c.get("/api/assets/M-1/alerts").json()["data"]
+        assert not any(w["new_alerts"] for w in windows)
+        stored = next(a for a in alerts if a["id"] == alert_id)
+        assert stored["status"] == "discarded" and stored["receipt"]["verdict"]["discard_reason"]
+
+    def test_discarded_alert_reopens_when_evidence_grows(self):
+        llm = ScriptedLLM([tool_call("load_matched_compare", {}), verdict("discarded", 0.7, "x")])
+        with self._client(llm) as c:
+            alert_id = raise_outer_race_alert(c)
+            c.post("/api/assets/M-1/diagnose", json={"alert_id": alert_id})
+            service = c.app.state.service
+            stored = next(a for a in service.repo.list_alerts("M-1") if a.id == alert_id)
+            service.repo.upsert_alert(stored.model_copy(update={"discarded_at_z": 1.0}))
+            windows = advance(c, windows=1)
+        assert [a["id"] for a in windows[0]["new_alerts"]] == [alert_id]
+
+    def test_diagnose_without_open_alert_is_422(self):
+        with self._client(ScriptedLLM()) as c:
+            commission(c)
+            r = c.post("/api/assets/M-1/diagnose")
+        assert r.status_code == 422
+        assert "no open alert" in r.json()["error"]["message"]
+
+    def test_commissioning_preview_structured_and_exclusive_inputs(self):
+        with self._client(None) as c:
+            r = c.post("/api/commissioning/preview", json={"spec": spec(bearings=[])})
+            both = c.post(
+                "/api/commissioning/preview", json={"spec": spec(), "nameplate_text": "15 kW"}
+            )
+            text = c.post("/api/commissioning/preview", json={"nameplate_text": "15 kW motor"})
+        data = r.json()["data"]
+        assert data["status"] == "ready" and data["fault_map"]["bins"]
+        assert "bearing_outer" in {u["fault_class"] for u in data["unavailable"]}
+        assert both.status_code == 422
+        assert text.status_code == 503  # free text needs the LLM
 
 
 class TestFleet:

@@ -11,12 +11,15 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from backend.agents.llm import AgentUnavailableError, LLMClient, llm_from_env
+from backend.api.diagnosis_service import DiagnosisService
 from backend.api.repository import AssetExistsError, InMemoryRepository, Repository
 from backend.api.routes import assets, fleet, simulator
 from backend.api.schemas import ApiError, Envelope
@@ -27,6 +30,8 @@ from backend.detection.baseline import DetectorConfig
 from backend.models.errors import DomainError
 
 logger = logging.getLogger(__name__)
+
+_UNSET: object = object()
 
 
 def _error(status: int, code: str, message: str, details: list | None = None) -> JSONResponse:
@@ -56,6 +61,10 @@ def _install_error_handlers(app: FastAPI) -> None:
     async def _http(_: Request, exc: HTTPException) -> JSONResponse:
         return _error(exc.status_code, "http_error", str(exc.detail))
 
+    @app.exception_handler(AgentUnavailableError)
+    async def _agent_unavailable(_: Request, exc: AgentUnavailableError) -> JSONResponse:
+        return _error(503, "agent_unavailable", str(exc))
+
     @app.exception_handler(DomainError)
     async def _domain(request: Request, exc: DomainError) -> JSONResponse:
         # Only DomainError is a user error. Any other exception propagates as a 500 so an
@@ -81,7 +90,13 @@ def create_app(
     settings: Settings | None = None,
     repository: Repository | None = None,
     detector_config: DetectorConfig | None = None,
+    llm: LLMClient | None | object = _UNSET,
 ) -> FastAPI:
+    """Build the app. `llm` defaults to the Anthropic client when ANTHROPIC_API_KEY is
+    set (read from .env too); pass None to run without agents, or a fake in tests."""
+    if llm is _UNSET:
+        load_dotenv()
+        llm = llm_from_env()
     cfg = settings or Settings.from_env()
 
     @asynccontextmanager
@@ -103,11 +118,12 @@ def create_app(
 
     app = FastAPI(
         title="Nameplate",
-        version="0.3.0",
+        version="0.4.0",
         description="Physics-derived condition monitoring for VFD-driven induction motors",
         lifespan=lifespan,
     )
     app.state.service = MonitoringService(repository or InMemoryRepository(), cfg, detector_config)
+    app.state.diagnosis = DiagnosisService(app.state.service, llm)  # type: ignore[arg-type]
     app.state.hub = TelemetryHub()
     app.add_middleware(
         CORSMiddleware,
@@ -116,7 +132,7 @@ def create_app(
         allow_headers=["Content-Type"],
     )
     _install_error_handlers(app)
-    for router in (assets.router, simulator.router, fleet.router):
+    for router in (assets.router, assets.preview_router, simulator.router, fleet.router):
         app.include_router(router)
 
     @app.get("/api/health", tags=["meta"])
