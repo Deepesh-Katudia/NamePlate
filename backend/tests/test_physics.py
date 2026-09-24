@@ -53,6 +53,7 @@ def make_spec(**overrides) -> MotorSpec:
         supply_frequency_hz=60.0,
         poles=4,
         rated_speed_rpm=1750.0,
+        rated_efficiency=0.91,
         rotor_slots=28,
         bearings=[DE_6205, NDE_6203],
     )

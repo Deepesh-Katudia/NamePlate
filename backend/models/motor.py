@@ -77,6 +77,16 @@ class MotorSpec(BaseModel):
     stator_resistance_ohm: float | None = Field(
         default=None, gt=0, description="Per-phase stator resistance, if known"
     )
+    locked_rotor_current_ratio: float | None = Field(
+        default=None,
+        gt=1,
+        le=15,
+        description=(
+            "Locked-rotor to rated current ratio (from the NEMA code letter or datasheet). "
+            "Sets the negative-sequence admittance used to separate supply-voltage unbalance "
+            "from winding asymmetry"
+        ),
+    )
     rotor_slots: int | None = Field(
         default=None, gt=0, description="Rotor slot count R; None means unknown, not zero"
     )
