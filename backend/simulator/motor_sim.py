@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.energy.load import MissingParameterError, loss_breakdown
+from backend.models.errors import DomainError
 from backend.models.fault_map import FaultMap
 from backend.models.motor import MotorSpec
 from backend.physics.fault_map import build_fault_map
@@ -86,7 +87,7 @@ def operating_current(spec: MotorSpec, load_factor: float) -> tuple[float, float
     p_rated = spec.rated_power_kw * 1000.0
     i_active_rated = p_rated / spec.rated_efficiency / (3.0 * v_ph)
     if i_active_rated >= spec.rated_current_a:
-        raise ValueError(
+        raise DomainError(
             "Nameplate inconsistent: rated input power implies power factor >= 1 "
             f"(active current {i_active_rated:.1f} A vs rated {spec.rated_current_a} A)"
         )
@@ -143,7 +144,7 @@ def _supply_unbalance(
 ) -> tuple[InjectedComponent, InjectedComponent]:
     """Voltage negative sequence and the motor's current response I2 = Y2 * V2."""
     if spec.locked_rotor_current_ratio is None:
-        raise ValueError(
+        raise DomainError(
             "Simulating supply unbalance needs locked_rotor_current_ratio to set the motor's "
             "negative-sequence admittance"
         )

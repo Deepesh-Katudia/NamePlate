@@ -21,20 +21,15 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from backend.models.errors import MissingParameterError
 from backend.models.motor import MotorSpec
+
+__all__ = ["MissingParameterError"]  # re-exported for callers of this module
 
 LOSS_SPLIT_TOLERANCE = 1e-6
 MEASUREMENT_UNCERTAINTY = 0.01  # fraction of P_in: VT/CT and sampling error
 LOSS_MODEL_UNCERTAINTY = 0.30  # fraction of any loss term derived from the split
 NEAR_NO_LOAD = 0.05
-
-
-class MissingParameterError(ValueError):
-    """A nameplate parameter the calculation needs was not supplied."""
-
-    def __init__(self, parameter: str, purpose: str) -> None:
-        self.parameter = parameter
-        super().__init__(f"{parameter} is required for {purpose}; it is not defaulted")
 
 
 class LossSplit(BaseModel):

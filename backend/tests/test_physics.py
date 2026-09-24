@@ -257,7 +257,7 @@ class TestMotorSpecValidation:
 
 class TestFaultMap:
     def test_full_spec_covers_all_fault_classes(self):
-        fmap = build_fault_map(make_spec())
+        fmap = build_fault_map(make_spec(locked_rotor_current_ratio=6.5))
         assert fmap.unavailable == []
         assert fmap.operating_point.source == OperatingPointSource.NAMEPLATE_RATED
         classes = {b.fault_class for b in fmap.bins}
@@ -291,7 +291,7 @@ class TestFaultMap:
         fmap = build_fault_map(spec)
         assert not any(b.bearing_position == "DE" for b in fmap.bins)
         assert any(b.bearing_position == "NDE" for b in fmap.bins)
-        assert {u.bearing_position for u in fmap.unavailable} == {"DE"}
+        assert {u.bearing_position for u in fmap.unavailable if u.bearing_position} == {"DE"}
         item = next(c for c in fmap.needs_confirmation if "ACME-77" in c.reason)
         assert "pitch_diameter_mm" in item.reason
 
@@ -309,7 +309,7 @@ class TestFaultMap:
         )
         fmap = build_fault_map(spec)
         assert any(b.fault_class == FaultClass.BEARING_OUTER for b in fmap.bins)
-        assert fmap.needs_confirmation == []
+        assert not any("bearing" in c.parameter for c in fmap.needs_confirmation)
 
     def test_supplied_geometry_conflicting_with_database_is_flagged(self):
         typo = BearingGeometry(
@@ -323,6 +323,11 @@ class TestFaultMap:
         )
         fmap = build_fault_map(spec)
         assert any("differs from the database" in c.reason for c in fmap.needs_confirmation)
+
+    def test_stator_winding_unavailable_without_lrc_ratio(self):
+        fmap = build_fault_map(make_spec())
+        assert FaultClass.STATOR_WINDING in {u.fault_class for u in fmap.unavailable}
+        assert any(c.parameter == "locked_rotor_current_ratio" for c in fmap.needs_confirmation)
 
     def test_missing_rotor_slots_requires_confirmation(self):
         fmap = build_fault_map(make_spec(rotor_slots=None))
@@ -339,7 +344,7 @@ class TestFaultMap:
 
     def test_single_bearing_leaves_other_position_unavailable(self):
         fmap = build_fault_map(make_spec(bearings=[DE_6205]))
-        assert {u.bearing_position for u in fmap.unavailable} == {"NDE"}
+        assert {u.bearing_position for u in fmap.unavailable if u.bearing_position} == {"NDE"}
         assert any(c.parameter == "bearing_designation[NDE]" for c in fmap.needs_confirmation)
 
     def test_every_bin_traces_to_an_equation(self):

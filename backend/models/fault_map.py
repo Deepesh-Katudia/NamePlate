@@ -21,6 +21,7 @@ class FaultClass(StrEnum):
     BEARING_INNER = "bearing_inner"
     BEARING_BALL = "bearing_ball"
     BEARING_CAGE = "bearing_cage"
+    STATOR_WINDING = "stator_winding"  # sequence-based, not a frequency bin
 
 
 BEARING_FAULT_CLASSES: tuple[FaultClass, ...] = (

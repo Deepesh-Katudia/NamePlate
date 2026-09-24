@@ -135,6 +135,29 @@ def resolution_plan(
     )
 
 
+def average_spectra(spectra: list[Spectrum]) -> Spectrum:
+    """Mean power across spectra on the same frequency grid (e.g. the three phase currents).
+
+    Averaging phases lowers noise variance and cancels per-phase fundamental shifts caused by
+    unbalance, which would otherwise move every fundamental-normalised level together.
+    """
+    if not spectra:
+        raise ValueError("need at least one spectrum")
+    first = spectra[0]
+    if any(
+        s.power.shape != first.power.shape or s.resolution_hz != first.resolution_hz
+        for s in spectra
+    ):
+        raise ValueError("spectra must share frequency grid and resolution")
+    return Spectrum(
+        frequencies_hz=first.frequencies_hz,
+        power=np.mean([s.power for s in spectra], axis=0),
+        resolution_hz=first.resolution_hz,
+        n_segments=sum(s.n_segments for s in spectra),
+        sample_rate_hz=first.sample_rate_hz,
+    )
+
+
 def welch_spectrum(x: NDArray[np.float64], sample_rate_hz: float, resolution_hz: float) -> Spectrum:
     """Hann-windowed Welch spectrum, 50 % overlap, bin spacing <= `resolution_hz`."""
     if resolution_hz <= 0:

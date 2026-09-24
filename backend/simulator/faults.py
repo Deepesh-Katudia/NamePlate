@@ -17,6 +17,7 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.models.errors import DomainError
 from backend.models.fault_map import FaultBin, FaultClass, FaultMap
 
 STATOR_NEG_SEQ_AT_FULL_SEVERITY = 0.10  # negative-sequence current as fraction of I1
@@ -120,7 +121,7 @@ def _select_bins(fmap: FaultMap, injection: FaultInjection) -> list[FaultBin]:
         if b.source == source and b.bearing_position == injection.bearing_position
     ]
     if not bins:
-        raise ValueError(
+        raise DomainError(
             f"Cannot inject {fault.value} at {injection.bearing_position}: the fault map has no "
             "bearing bins there (bearing unknown or not supplied)"
         )

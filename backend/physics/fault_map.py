@@ -35,6 +35,10 @@ from backend.physics.fault_frequencies import (
 )
 
 SLIP_ESTIMATION = "sensorless_slip_estimation"
+STATOR_UNAVAILABLE_REASON = (
+    "locked_rotor_current_ratio unknown: supply-voltage unbalance cannot be separated "
+    "from winding asymmetry, and raw current unbalance would false-alarm"
+)
 
 _BEARING_SOURCE_TO_CLASS: dict[str, FaultClass] = {
     "BPFO": FaultClass.BEARING_OUTER,
@@ -171,6 +175,23 @@ def _slot_harmonics(
     return psh, []
 
 
+def _stator_coverage(
+    spec: MotorSpec,
+) -> tuple[list[UnavailableFault], list[ConfirmationItem]]:
+    if spec.locked_rotor_current_ratio is not None:
+        return [], []
+    return (
+        [UnavailableFault(fault_class=FaultClass.STATOR_WINDING, reason=STATOR_UNAVAILABLE_REASON)],
+        [
+            ConfirmationItem(
+                parameter="locked_rotor_current_ratio",
+                reason=STATOR_UNAVAILABLE_REASON + " (read it from the NEMA code letter)",
+                blocks=[FaultClass.STATOR_WINDING],
+            )
+        ],
+    )
+
+
 def build_fault_map(spec: MotorSpec, rotor_speed_rpm: float | None = None) -> FaultMap:
     """Derive every monitored frequency bin for `spec` at the given (or rated) speed."""
     op = operating_point(spec, rotor_speed_rpm)
@@ -186,11 +207,16 @@ def build_fault_map(spec: MotorSpec, rotor_speed_rpm: float | None = None) -> Fa
     ]
     bearing_bins, unavailable, bearing_confirmations = _bearing_section(spec, op)
     psh, psh_confirmations = _slot_harmonics(spec, op)
+    stator_unavailable, stator_confirmations = _stator_coverage(spec)
     return FaultMap(
         asset_id=spec.asset_id,
         operating_point=op,
         bins=[*bins, *bearing_bins],
         slot_harmonics=psh,
-        unavailable=unavailable,
-        needs_confirmation=[*bearing_confirmations, *psh_confirmations],
+        unavailable=[*unavailable, *stator_unavailable],
+        needs_confirmation=[
+            *bearing_confirmations,
+            *psh_confirmations,
+            *stator_confirmations,
+        ],
     )

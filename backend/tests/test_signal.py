@@ -10,6 +10,7 @@ from backend.signal.envelope import envelope, envelope_spectrum
 from backend.signal.slip import SlipEstimationUnavailableError, estimate_slip_psh
 from backend.signal.spectrum import (
     InsufficientRecordError,
+    average_spectra,
     min_record_seconds,
     required_resolution_hz,
     resolution_plan,
@@ -81,6 +82,19 @@ class TestSpectrum:
         spec = welch_spectrum(tone([(60.0, 1.0)]), FS, resolution_hz=0.25)
         with pytest.raises(ValueError, match="measurable"):
             spec.tone(FS / 2, search_halfwidth_hz=0.25)
+
+    def test_average_spectra_means_power(self):
+        a = welch_spectrum(tone([(60.0, 1.0)]), FS, resolution_hz=0.25)
+        b = welch_spectrum(tone([(60.0, 3.0)]), FS, resolution_hz=0.25)
+        avg = average_spectra([a, b])
+        assert avg.tone(60.0, 0.5).power == pytest.approx((0.5 + 4.5) / 2, rel=1e-3)
+        assert avg.n_segments == a.n_segments + b.n_segments
+
+    def test_average_spectra_rejects_mismatched_grids(self):
+        a = welch_spectrum(tone([(60.0, 1.0)]), FS, resolution_hz=0.25)
+        b = welch_spectrum(tone([(60.0, 1.0)]), FS, resolution_hz=0.5)
+        with pytest.raises(ValueError, match="grid"):
+            average_spectra([a, b])
 
     def test_db_relative(self):
         x = tone([(60.0, 1.0), (56.0, 0.01)])
