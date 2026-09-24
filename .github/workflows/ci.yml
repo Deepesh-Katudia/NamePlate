@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.txt
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        # Exit code 5 ("no tests collected") tolerated only during scaffold; removed in Phase 1.
+        run: pytest --cov=backend --cov-report=term-missing || [ $? -eq 5 ]
