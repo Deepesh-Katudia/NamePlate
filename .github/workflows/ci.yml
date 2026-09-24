@@ -19,5 +19,4 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Test
-        # Exit code 5 ("no tests collected") tolerated only during scaffold; removed in Phase 1.
-        run: pytest --cov=backend --cov-report=term-missing || [ $? -eq 5 ]
+        run: pytest --cov=backend --cov-report=term-missing

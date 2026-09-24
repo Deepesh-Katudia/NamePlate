@@ -1,0 +1,12 @@
+{
+  "_reference": "Thomson & Fenger, 'Current signature analysis to detect induction motor faults', IEEE Industry Applications Magazine 7(4), 2001. Bands are lower-sideband dB below the supply fundamental. Site-calibrate before relying on them.",
+  "min_load_factor": 0.5,
+  "bands": [
+    {"min_db_down": 54.0, "state": "excellent", "description": "Rotor healthy"},
+    {"min_db_down": 48.0, "state": "good", "description": "Rotor healthy"},
+    {"min_db_down": 42.0, "state": "moderate", "description": "Trend; re-test at next interval"},
+    {"min_db_down": 36.0, "state": "cracked_bar_or_high_resistance_joint", "description": "Rotor bar crack developing or high-resistance joint"},
+    {"min_db_down": 30.0, "state": "broken_bars", "description": "Two or more bars likely cracked or broken"},
+    {"min_db_down": 0.0, "state": "multiple_broken_bars", "description": "Multiple broken bars or end-ring fault; plan repair"}
+  ]
+}
